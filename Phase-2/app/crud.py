@@ -139,8 +139,6 @@ def analyze_vehicles(filters, group_by):
         if filters.vehicle_type:
             match_stage["vehicle.ev_type"] = filters.vehicle_type
 
-    # Map group_by to correct nested path
-
     field_mapping = {
         "make": "vehicle.make",
         "model": "vehicle.model",
@@ -172,7 +170,7 @@ def analyze_vehicles(filters, group_by):
     ]
 
     results = list(vehicles_collection.aggregate(pipeline))
-    cleanedres = []
+    cleanedRes = []
     for r in results:
         id_val = r.get("_id")
         if id_val is None:
@@ -180,6 +178,6 @@ def analyze_vehicles(filters, group_by):
         if isinstance(id_val, float) and math.isnan(id_val):
             continue
         
-        cleanedres.append(r)
+        cleanedRes.append(r)
     
-    return cleanedres
+    return cleanedRes
