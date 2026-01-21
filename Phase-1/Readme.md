@@ -142,7 +142,7 @@ These indexes support:
 
 ### Python
 
-- Python 3.9+
+- Python 3.12+
 
 ### Dependencies
 
@@ -165,19 +165,13 @@ pip install -r requirements.txt
 1. **Start MongoDB:**
 
    ```bash
-   mongod
+   docker exec -it mongodb mongosh
    ```
 
-2. **Ensure the CSV file is present:**
-
-   ```
-   Electric_Vehicle_Population_Data.csv
-   ```
-
-3. **Run the pipeline:**
+2. **Run the pipeline:**
 
    ```bash
-   python pipeline.py
+   python main.py
    ```
 
 The default MongoDB connection is:
@@ -203,12 +197,3 @@ mongodb://localhost:27017
 - VIN (1-10) is sufficient for analytics purposes
 - Some location fields may be missing
 - Data is append-only for Phase 1
-
----
-
-## Future Enhancements
-
-- FastAPI analytics endpoints
-- MongoDB aggregation pipelines
-- Dockerized deployment
-- Data quality metrics and reporting
