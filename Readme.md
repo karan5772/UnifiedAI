@@ -37,7 +37,7 @@ This project consists of three main components:
 ```
 UnifiedAI/
 ├── Phase-1/                    # Data Pipeline
-│   ├── main.py                 # ETL script
+│   ├── main.py                 # Pipeline script
 │   ├── Electric_Vehicle_Population_Data.csv
 │   ├── requirements.txt
 │   ├── .env
