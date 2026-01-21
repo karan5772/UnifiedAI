@@ -3,9 +3,9 @@ from typing import List, Optional, Literal, Dict
 
 class VehicleAnalyzeFilters(BaseModel):
     makes: Optional[List[str]] = None
-    model_years: Optional[Dict[str, int]] = None  # {"start": 2020, "end": 2024}
+    model_years: Optional[Dict[str, int]] = None  
     min_electric_range: Optional[int] = None
-    vehicle_type: Optional[str] = None  # BEV or PHEV
+    vehicle_type: Optional[str] = None 
 
 class VehicleAnalyzeRequest(BaseModel):
     filters: Optional[VehicleAnalyzeFilters] = None
