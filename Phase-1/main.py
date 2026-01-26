@@ -1,6 +1,9 @@
 import os
 import logging
-from typing import Optional
+import subprocess
+import tempfile
+from multiprocessing import Pool, cpu_count
+import math
 
 
 import pandas as pd
@@ -33,19 +36,78 @@ NUMERIC_COLUMNS = [
     "DOL Vehicle ID"
 ]
 
-def load_csv(csv_path: str) -> pd.DataFrame:
-   
+
+LINES_PER_SPLIT = 100_000  # for records
+BATCH_SIZE = 10_000        # for mongo
+
+def get_csv_header(csv_path: str) -> str:
+    with open(csv_path, 'r') as f:
+        return f.readline()
+
+
+def count_lines(csv_path: str) -> int:
+    result = subprocess.run(
+        ['wc', '-l', csv_path],
+        capture_output=True,
+        text=True
+    )
+    return int(result.stdout.strip().split()[0])
+
+def split_csv_file(csv_path: str, output_dir: str, lines_per_file: int = LINES_PER_SPLIT) -> list[str]:
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    logger.info(f"Loading CSV from {csv_path}")
-    df = pd.read_csv(csv_path)
-    logger.info(f"Loaded {len(df)} rows")
-    return df
+    os.makedirs(output_dir, exist_ok=True)
+
+    header = get_csv_header(csv_path)
+    
+    
+    total_lines = count_lines(csv_path) - 1 
+    total_splits = math.ceil(total_lines / lines_per_file)
+    
+    logger.info(f"Total rows: {total_lines}")
+    logger.info(f"Splitting into {total_splits} files with {lines_per_file} rows each")
+
+    # Use tail to skip header, then split
+    split_prefix = os.path.join(output_dir, "chunk_")
+    
+    # Create split files without header first
+    subprocess.run(
+        f'tail -n +2 "{csv_path}" | split -l {lines_per_file} -d -a 4 - "{split_prefix}"',
+        shell=True,
+        check=True
+    )
+
+    # Get all split files and add headers
+    split_files = sorted([
+        os.path.join(output_dir, f) 
+        for f in os.listdir(output_dir) 
+        if f.startswith("chunk_")
+    ])
+
+    for split_file in split_files:
+        with open(split_file, 'r') as f:
+            content = f.read()
+        with open(split_file + '.csv', 'w') as f:
+            f.write(header)
+            f.write(content)
+        
+        os.remove(split_file)
 
 
-def validate_and_transform(df: pd.DataFrame) -> pd.DataFrame:
-    logger.info("Validating and transforming data")
+    split_files = sorted([
+        os.path.join(output_dir, f)
+        for f in os.listdir(output_dir)
+        if f.endswith('.csv')
+    ])
+
+    logger.info(f"Created {len(split_files)} split files")
+    return split_files
+
+
+
+def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    # logger.info("Validating and transforming data")
 
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
@@ -104,46 +166,109 @@ def validate_and_transform(df: pd.DataFrame) -> pd.DataFrame:
     logger.info(f"Transformed {len(records)} records")
     return records
 
+def process_and_insert(args: tuple) -> dict:
+    file_path, mongo_uri, db_name, collection_name = args
+    
+    logger.info(f"Processing: {os.path.basename(file_path)}")
+    
+    try:
+        df = pd.read_csv(file_path)
+        records = transform_dataframe(df)
+        
+        client = MongoClient(mongo_uri)
+        collection = client[db_name][collection_name]
+        
+        inserted = 0
+        for i in range(0, len(records), BATCH_SIZE):
+            batch = records[i:i + BATCH_SIZE]
+            try:
+                collection.insert_many(batch, ordered=False)
+                inserted += len(batch)
+            except BulkWriteError as e:
+                inserted += e.details.get('nInserted', 0)
+        
+        client.close()
+        
+        return {
+            "file": os.path.basename(file_path),
+            "status": "success",
+            "processed": len(records),
+            "inserted": inserted
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed: {file_path} - {e}")
+        return {
+            "file": os.path.basename(file_path),
+            "status": "error",
+            "error": str(e)
+        }
+    
 
-
-def load_to_mongo(
-    records: list[dict],
-    mongo_uri: str,
-    db_name: str = "ev_data",
-    collection_name: str = "vehicles"
-):
-    logger.info("Connecting to MongoDB")
+def create_indexes(mongo_uri: str, db_name: str, collection_name: str):
+    logger.info("Creating indexes...")
+    
     client = MongoClient(mongo_uri)
     collection = client[db_name][collection_name]
-
-    try:
-        collection.insert_many(records, ordered=False)
-        logger.info(f"Inserted {len(records)} records")
-    except BulkWriteError as e:
-        logger.warning("Bulk insert completed with some duplicate errors")
-
-    logger.info("Creating indexes")
-
+    
     collection.create_index("location.state")
     collection.create_index("location.county")
     collection.create_index("location.city")
     collection.create_index("vehicle.model_year")
     collection.create_index("vehicle.make")
     collection.create_index("vehicle.ev_type")
-    collection.create_index(
-        [("location.state", ASCENDING), ("vehicle.model_year", ASCENDING)]
-    )
-
+    collection.create_index([
+        ("location.state", ASCENDING),
+        ("vehicle.model_year", ASCENDING)
+    ])
+    
+    client.close()
     logger.info("Indexes created")
 
-def run_pipeline(
+def run_pipeline_parallel(
     csv_path: str,
-    mongo_uri: str = os.getenv("MONGO_URL")
+    mongo_uri: str = os.getenv("MONGO_URI"),
+    db_name: str = "ev_data",
+    collection_name: str = "vehicles",
+    num_workers: int = None,
 ):
-    df = load_csv(csv_path)
-    records = validate_and_transform(df)
-    load_to_mongo(records, mongo_uri)
+    if num_workers is None:
+        num_workers = cpu_count()
+
+    logger.info(f"Starting parallel pipeline with {num_workers} workers")
+
+    # temprary dir
+    temp_dir = tempfile.mkdtemp(prefix="csv_splits_")
+    logger.info(f"Temp directory: {temp_dir}")
+
+    split_files = split_csv_file(csv_path, temp_dir)
+
+    # process and insert to mongo
+    args_list = [
+        (f, mongo_uri, db_name, collection_name)
+        for f in split_files
+    ]
+    results = []
+    with Pool(processes=num_workers) as pool:
+        results = pool.map(process_and_insert, args_list)
+
+    total_processed = sum(r.get("processed", 0) for r in results)
+    total_inserted = sum(r.get("inserted", 0) for r in results)
+    failed = [r for r in results if r["status"] == "error"]
+
+    logger.info(f"Processed: {total_processed} records")
+    logger.info(f"Inserted: {total_inserted} records")
+        
+    if failed:
+        logger.warning(f"Failed files: {len(failed)}")
+        for f in failed:
+            logger.warning(f"  - {f['file']}: {f.get('error')}")
+
+    create_indexes(mongo_uri, db_name, collection_name)
 
 
 if __name__ == "__main__":
-    run_pipeline("Electric_Vehicle_Population_Data.csv")
+    run_pipeline_parallel(
+        csv_path="Electric_Vehicle_Population_Data.csv",
+        num_workers=2
+    )
